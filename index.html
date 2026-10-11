@@ -1,0 +1,598 @@
+# DuckDevelop
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Motor de Juegos - DuckDevelop</title>
+    <style>
+        body { font-family: sans-serif; background: #222; color: #fff; text-align: center; margin: 0; padding: 15px; }
+        canvas { background: #111; border: 2px solid #555; cursor: pointer; display: block; margin: 10px auto; touch-action: none; }
+        button, label { padding: 8px 14px; background: #4CAF50; color: white; border: none; cursor: pointer; font-size: 14px; border-radius: 4px; margin: 4px; font-weight: bold; display: inline-block; }
+        button:hover, label:hover { background: #45a049; }
+        input[type="file"] { display: none; }
+        #info { color: #aaa; font-size: 13px; margin-bottom: 8px; }
+        .active-btn { background: #ff9800 !important; }
+
+        /* Modal para copiar código en APK o Web */
+        #modalExport {
+            display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(0,0,0,0.85); z-index: 1000; flex-direction: column;
+            justify-content: center; align-items: center; padding: 20px; box-sizing: border-box;
+        }
+        #modalExport textarea {
+            width: 90%; height: 60%; background: #111; color: #4CAF50;
+            border: 1px solid #555; padding: 10px; font-family: monospace; font-size: 12px;
+            border-radius: 6px; resize: none; margin-bottom: 12px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>DuckDevelop - Motor 2D</h1>
+    <div id="info">Cámara infinita horizontal. Coloca bloques, joystick, botón salto o bandera de meta (Finish).</div>
+    <div>
+        <button id="btnPlataforma" onclick="cambiarModo('plataforma')" class="active-btn">Poner Bloque</button>
+        <button id="btnBorrar" onclick="cambiarModo('borrar')">Borrar Bloque</button>
+        <button id="btnJoystick" onclick="cambiarModo('joystick')">Colocar Joystick</button>
+        <button id="btnJump" onclick="cambiarModo('jump')">Colocar Botón Salto</button>
+        <button id="btnBandera" onclick="cambiarModo('bandera')">Poner Bandera Finish</button>
+        
+        <label for="imgInput">Cargar Sprite Sheet (2x2)</label>
+        <input type="file" id="imgInput" accept="image/*">
+        
+        <button onclick="exportarJuego()" style="background: #2196F3;">Exportar Juego</button>
+    </div>
+
+    <canvas id="gameCanvas" width="800" height="450"></canvas>
+
+    <!-- Modal de Exportación y Copia de Código -->
+    <div id="modalExport">
+        <h2 style="margin: 0 0 10px 0; color: #4CAF50;">¡Juego Exportado!</h2>
+        <p style="margin: 0 0 10px 0; font-size: 14px; color: #ccc;">Si la descarga no comenzó automáticamente en tu APK, copia el código a continuación:</p>
+        <textarea id="txtCodigoHtml" readonly></textarea>
+        <div>
+            <button onclick="copiarCodigoModal()" style="background: #ff9800;">Copiar Código</button>
+            <button onclick="cerrarModal()" style="background: #f44336;">Cerrar</button>
+        </div>
+    </div>
+
+    <script>
+        // Sistema de Protección Anti-Offline / Anti-HTTrack
+        (function verificarSeguridad() {
+            if (!navigator.onLine) {
+                bloquearMotor();
+                return;
+            }
+            // Realiza una petición ligera para verificar conexión real
+            fetch('https://httpbin.org/get', { mode: 'no-cors', cache: 'no-store' })
+                .catch(() => {
+                    bloquearMotor();
+                });
+        })();
+
+        function bloquearMotor() {
+            document.body.innerHTML = '';
+            document.body.style.background = '#000000';
+            throw new Error("Acceso denegado: Se requiere conexión a internet para ejecutar DuckDevelop.");
+        }
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let modo = 'plataforma'; // 'plataforma', 'borrar', 'joystick', 'jump', 'bandera'
+        
+        function cambiarModo(m) {
+            modo = m;
+            document.querySelectorAll('button').forEach(b => {
+                if(b.id.startsWith('btn')) b.classList.remove('active-btn');
+            });
+            let btn = document.getElementById('btn' + m.charAt(0).toUpperCase() + m.slice(1));
+            if(btn) btn.classList.add('active-btn');
+        }
+
+        let plataformas = [
+            { x: -500, y: 400, w: 3000, h: 50 } // Piso inicial largo para scroll
+        ];
+
+        let banderas = []; // Posiciones de la bandera de meta
+
+        let uiJoystick = { x: 80, y: 350, r: 50 };
+        let uiJump = { x: 720, y: 350, r: 40 };
+
+        let jugador = {
+            x: 100, y: 200, w: 40, h: 40,
+            vx: 0, vy: 0,
+            velocidad: 4, salto: -10, gravedad: 0.5,
+            enSuelo: false
+        };
+
+        let cameraX = 0; // Desplazamiento de la cámara horizontal infinita
+
+        let spriteJugador = null;
+        let spriteDataURL = null;
+        let animFrame = 0;
+        let animTimer = 0;
+
+        document.getElementById('imgInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(event) {
+                    spriteDataURL = event.target.result;
+                    const img = new Image();
+                    img.onload = () => spriteJugador = img;
+                    img.src = spriteDataURL;
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        let teclas = {};
+        window.addEventListener('keydown', e => teclas[e.code] = true);
+        window.addEventListener('keyup', e => teclas[e.code] = false);
+
+        let joystickActivo = false;
+        let direccionX = 0;
+        let saltoTocado = false;
+
+        canvas.addEventListener('click', e => {
+            const rect = canvas.getBoundingClientRect();
+            const clickX = (e.clientX - rect.left) + cameraX; // Ajustado al mundo infinito
+            const clickY = e.clientY - rect.top;
+
+            if (modo === 'plataforma') {
+                plataformas.push({ x: clickX - 40, y: clickY - 10, w: 80, h: 20 });
+            } else if (modo === 'borrar') {
+                plataformas = plataformas.filter(p => !(clickX >= p.x && clickX <= p.x + p.w && clickY >= p.y && clickY <= p.y + p.h));
+                banderas = banderas.filter(b => !(clickX >= b.x && clickX <= b.x + 30 && clickY >= b.y && clickY <= b.y + 60));
+            } else if (modo === 'bandera') {
+                banderas.push({ x: clickX, y: clickY - 60, w: 30, h: 60 });
+            } else if (modo === 'joystick') {
+                uiJoystick.x = e.clientX - rect.left;
+                uiJoystick.y = clickY;
+                cambiarModo('plataforma');
+            } else if (modo === 'jump') {
+                uiJump.x = e.clientX - rect.left;
+                uiJump.y = clickY;
+                cambiarModo('plataforma');
+            }
+        });
+
+        canvas.addEventListener('pointerdown', e => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            let distJump = Math.hypot(x - uiJump.x, y - uiJump.y);
+            if (distJump <= uiJump.r) saltoTocado = true;
+
+            let distJoy = Math.hypot(x - uiJoystick.x, y - uiJoystick.y);
+            if (distJoy <= uiJoystick.r * 1.5) {
+                joystickActivo = true;
+                actualizarJoystick(x);
+            }
+        });
+
+        canvas.addEventListener('pointermove', e => {
+            if (joystickActivo) {
+                const rect = canvas.getBoundingClientRect();
+                actualizarJoystick(e.clientX - rect.left);
+            }
+        });
+
+        window.addEventListener('pointerup', () => {
+            joystickActivo = false;
+            direccionX = 0;
+            saltoTocado = false;
+        });
+
+        function actualizarJoystick(x) {
+            let diff = x - uiJoystick.x;
+            if (diff < -10) direccionX = -1;
+            else if (diff > 10) direccionX = 1;
+            else direccionX = 0;
+        }
+
+        function actualizar() {
+            if (teclas['ArrowLeft'] || teclas['KeyA'] || direccionX === -1) {
+                jugador.vx = -jugador.velocidad;
+            } else if (teclas['ArrowRight'] || teclas['KeyD'] || direccionX === 1) {
+                jugador.vx = jugador.velocidad;
+            } else {
+                jugador.vx = 0;
+            }
+
+            if ((teclas['ArrowUp'] || teclas['Space'] || teclas['KeyW'] || saltoTocado) && jugador.enSuelo) {
+                jugador.vy = jugador.salto;
+                jugador.enSuelo = false;
+                saltoTocado = false;
+            }
+
+            jugador.vy += jugador.gravedad;
+            jugador.x += jugador.vx;
+            jugador.y += jugador.vy;
+
+            // Colisiones con plataformas
+            jugador.enSuelo = false;
+            for (let p of plataformas) {
+                if (jugador.x < p.x + p.w &&
+                    jugador.x + jugador.w > p.x &&
+                    jugador.y < p.y + p.h &&
+                    jugador.y + jugador.h > p.y) {
+                    
+                    if (jugador.vy > 0 && jugador.y + jugador.h - jugador.vy <= p.y) {
+                        jugador.y = p.y - jugador.h;
+                        jugador.vy = 0;
+                        jugador.enSuelo = true;
+                    }
+                }
+            }
+
+            // Comprobar colisión con la Bandera de Meta (Finish) -> Reinicia al inicio
+            for (let b of banderas) {
+                if (jugador.x < b.x + b.w &&
+                    jugador.x + jugador.w > b.x &&
+                    jugador.y < b.y + b.h &&
+                    jugador.y + jugador.h > b.y) {
+                    // Reiniciar al inicio del mapa
+                    jugador.x = 100;
+                    jugador.y = 200;
+                    jugador.vx = 0;
+                    jugador.vy = 0;
+                }
+            }
+
+            // Cámara infinita sigue al jugador horizontalmente
+            cameraX = jugador.x - 300;
+            if (cameraX < -500) cameraX = -500;
+
+            // Animación del Sprite Sheet
+            if (spriteJugador) {
+                if (!jugador.enSuelo) {
+                    animFrame = 1;
+                } else if (jugador.vx !== 0) {
+                    animTimer++;
+                    if (animTimer > 8) {
+                        animFrame++;
+                        if (animFrame > 3) animFrame = 2;
+                        animTimer = 0;
+                    }
+                } else {
+                    animFrame = 0;
+                }
+            }
+        }
+
+        function dibujar() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.save();
+            ctx.translate(-cameraX, 0); // Aplicar desplazamiento de cámara horizontal
+
+            // Dibujar plataformas
+            ctx.fillStyle = '#4CAF50';
+            for (let p of plataformas) {
+                ctx.fillRect(p.x, p.y, p.w, p.h);
+                ctx.strokeStyle = '#2E7D32';
+                ctx.strokeRect(p.x, p.y, p.w, p.h);
+            }
+
+            // Dibujar Bandera de Meta (Patrón ajedrezado blanco y negro)
+            for (let b of banderas) {
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(b.x, b.y, 6, b.h);
+                let rows = 4;
+                let cols = 3;
+                let sqW = b.w / cols;
+                let sqH = (b.h / 2) / rows;
+                for (let r = 0; r < rows; r++) {
+                    for (let c = 0; c < cols; c++) {
+                        ctx.fillStyle = (r + c) % 2 === 0 ? '#000' : '#fff';
+                        ctx.fillRect(b.x + 6 + (c * sqW), b.y + (r * sqH), sqW, sqH);
+                    }
+                }
+            }
+
+            // Dibujar jugador
+            if (spriteJugador) {
+                const fW = spriteJugador.width / 2;
+                const fH = spriteJugador.height / 2;
+                const col = animFrame % 2;
+                const fila = Math.floor(animFrame / 2);
+
+                ctx.drawImage(
+                    spriteJugador,
+                    col * fW, fila * fH, fW, fH,
+                    jugador.x, jugador.y, jugador.w, jugador.h
+                );
+            } else {
+                ctx.fillStyle = '#FF5722';
+                ctx.fillRect(jugador.x, jugador.y, jugador.w, jugador.h);
+            }
+
+            ctx.restore(); // Restaurar cámara para los controles fijos de UI
+
+            // Dibujar controles táctiles fijos en pantalla
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.strokeStyle = '#fff';
+            
+            ctx.beginPath();
+            ctx.arc(uiJoystick.x, uiJoystick.y, uiJoystick.r, 0, Math.PI * 2);
+            ctx.fill(); ctx.stroke();
+            ctx.fillStyle = '#fff'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText('JOYSTICK', uiJoystick.x, uiJoystick.y + 4);
+
+            ctx.fillStyle = 'rgba(255, 87, 34, 0.3)';
+            ctx.beginPath();
+            ctx.arc(uiJump.x, uiJump.y, uiJump.r, 0, Math.PI * 2);
+            ctx.fill(); ctx.stroke();
+            ctx.fillStyle = '#fff';
+            ctx.fillText('SALTAR', uiJump.x, uiJump.y + 4);
+        }
+
+        function loop() {
+            actualizar();
+            dibujar();
+            requestAnimationFrame(loop);
+        }
+
+        function exportarJuego() {
+            const codigoHTML = `<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Mi Juego - DuckDevelop</title>
+    <style>
+        body { background: #222; color: #fff; text-align: center; margin: 0; font-family: sans-serif; overflow: hidden; }
+        canvas { background: #111; border: 2px solid #555; display: block; margin: 10px auto; touch-action: none; max-width: 100%; }
+        #splash {
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: #111; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; z-index: 999;
+            animation: fadeOut 0.5s ease 2.5s forwards;
+        }
+        #splash h1 { color: #4CAF50; font-size: 32px; margin: 0 0 10px 0; }
+        #splash p { color: #aaa; font-size: 18px; margin: 0; }
+        @keyframes fadeOut {
+            to { opacity: 0; visibility: hidden; }
+        }
+    </style>
+</head>
+<body>
+
+    <script>
+        // Protección Anti-Offline / Anti-HTTrack integrada en el juego exportado
+        (function verificarSeguridad() {
+            if (!navigator.onLine) {
+                document.body.innerHTML = '';
+                document.body.style.background = '#000000';
+                throw new Error("Sin conexión");
+            }
+            fetch('https://httpbin.org/get', { mode: 'no-cors', cache: 'no-store' })
+                .catch(() => {
+                    document.body.innerHTML = '';
+                    document.body.style.background = '#000000';
+                    throw new Error("Sin conexión");
+                });
+        })();
+    <\/script>
+
+    <div id="splash">
+        <h1>DuckDevelop</h1>
+        <p>By SantidevGames - Motor Engine</p>
+    </div>
+
+    <h1>Mi Juego Exportado</h1>
+    <canvas id="c" width="800" height="450"></canvas>
+
+    <script>
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+        const plataformas = ${JSON.stringify(plataformas)};
+        const banderas = ${JSON.stringify(banderas)};
+        const uiJoystick = ${JSON.stringify(uiJoystick)};
+        const uiJump = ${JSON.stringify(uiJump)};
+        
+        let jugador = { x: 100, y: 200, w: 40, h: 40, vx: 0, vy: 0, velocidad: 4, salto: -10, gravedad: 0.5, enSuelo: false };
+        let cameraX = 0;
+        let teclas = {};
+        
+        const spriteSrc = ${JSON.stringify(spriteDataURL)};
+        let spriteImg = null;
+        let animFrame = 0;
+        let animTimer = 0;
+
+        if (spriteSrc) {
+            spriteImg = new Image();
+            spriteImg.src = spriteSrc;
+        }
+
+        window.addEventListener('keydown', e => teclas[e.code] = true);
+        window.addEventListener('keyup', e => teclas[e.code] = false);
+
+        let joystickActivo = false;
+        let direccionX = 0;
+        let saltoTocado = false;
+
+        canvas.addEventListener('pointerdown', e => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (Math.hypot(x - uiJump.x, y - uiJump.y) <= uiJump.r) {
+                saltoTocado = true;
+            }
+            if (Math.hypot(x - uiJoystick.x, y - uiJoystick.y) <= uiJoystick.r * 1.5) {
+                joystickActivo = true;
+                actualizarJoystick(x);
+            }
+        });
+
+        canvas.addEventListener('pointermove', e => {
+            if (joystickActivo) {
+                const rect = canvas.getBoundingClientRect();
+                actualizarJoystick(e.clientX - rect.left);
+            }
+        });
+
+        window.addEventListener('pointerup', () => {
+            joystickActivo = false;
+            direccionX = 0;
+            saltoTocado = false;
+        });
+
+        function actualizarJoystick(x) {
+            let diff = x - uiJoystick.x;
+            if (diff < -10) direccionX = -1;
+            else if (diff > 10) direccionX = 1;
+            else direccionX = 0;
+        }
+
+        function loop() {
+            if (teclas['ArrowLeft'] || teclas['KeyA'] || direccionX === -1) {
+                jugador.vx = -jugador.velocidad;
+            } else if (teclas['ArrowRight'] || teclas['KeyD'] || direccionX === 1) {
+                jugador.vx = jugador.velocidad;
+            } else {
+                jugador.vx = 0;
+            }
+
+            if ((teclas['ArrowUp'] || teclas['Space'] || teclas['KeyW'] || saltoTocado) && jugador.enSuelo) {
+                jugador.vy = jugador.salto;
+                jugador.enSuelo = false;
+                saltoTocado = false;
+            }
+
+            jugador.vy += jugador.gravedad;
+            jugador.x += jugador.vx;
+            jugador.y += jugador.vy;
+
+            jugador.enSuelo = false;
+            for (let p of plataformas) {
+                if (jugador.x < p.x + p.w && jugador.x + jugador.w > p.x && jugador.y < p.y + p.h && jugador.y + jugador.h > p.y) {
+                    if (jugador.vy > 0 && jugador.y + jugador.h - jugador.vy <= p.y) {
+                        jugador.y = p.y - jugador.h;
+                        jugador.vy = 0;
+                        jugador.enSuelo = true;
+                    }
+                }
+            }
+
+            for (let b of banderas) {
+                if (jugador.x < b.x + b.w && jugador.x + jugador.w > b.x && jugador.y < b.y + b.h && jugador.y + jugador.h > b.y) {
+                    jugador.x = 100;
+                    jugador.y = 200;
+                    jugador.vx = 0;
+                    jugador.vy = 0;
+                }
+            }
+
+            cameraX = jugador.x - 300;
+            if (cameraX < -500) cameraX = -500;
+
+            if (spriteImg) {
+                if (!jugador.enSuelo) {
+                    animFrame = 1;
+                } else if (jugador.vx !== 0) {
+                    animTimer++;
+                    if (animTimer > 8) {
+                        animFrame++;
+                        if (animFrame > 3) animFrame = 2;
+                        animTimer = 0;
+                    }
+                } else {
+                    animFrame = 0;
+                }
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.save();
+            ctx.translate(-cameraX, 0);
+
+            ctx.fillStyle = '#4CAF50';
+            plataformas.forEach(p => ctx.fillRect(p.x, p.y, p.w, p.h));
+
+            for (let b of banderas) {
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(b.x, b.y, 6, b.h);
+                let rows = 4, cols = 3;
+                let sqW = b.w / cols, sqH = (b.h / 2) / rows;
+                for (let r = 0; r < rows; r++) {
+                    for (let c = 0; c < cols; c++) {
+                        ctx.fillStyle = (r + c) % 2 === 0 ? '#000' : '#fff';
+                        ctx.fillRect(b.x + 6 + (c * sqW), b.y + (r * sqH), sqW, sqH);
+                    }
+                }
+            }
+            
+            if (spriteImg) {
+                const fW = spriteImg.width / 2;
+                const fH = spriteImg.height / 2;
+                const col = animFrame % 2;
+                const fila = Math.floor(animFrame / 2);
+                ctx.drawImage(spriteImg, col * fW, fila * fH, fW, fH, jugador.x, jugador.y, jugador.w, jugador.h);
+            } else {
+                ctx.fillStyle = '#FF5722';
+                ctx.fillRect(jugador.x, jugador.y, jugador.w, jugador.h);
+            }
+
+            ctx.restore();
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+            ctx.strokeStyle = '#fff';
+            ctx.beginPath(); ctx.arc(uiJoystick.x, uiJoystick.y, uiJoystick.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = '#fff'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText('JOYSTICK', uiJoystick.x, uiJoystick.y + 4);
+
+            ctx.fillStyle = 'rgba(255, 87, 34, 0.25)';
+            ctx.beginPath(); ctx.arc(uiJump.x, uiJump.y, uiJump.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = '#fff';
+            ctx.fillText('SALTAR', uiJump.x, uiJump.y + 4);
+
+            requestAnimationFrame(loop);
+        }
+
+        setTimeout(() => {
+            loop();
+        }, 3000);
+    <\/script>
+</body>
+</html>`;
+
+            // 1. Intenta descargar automáticamente
+            try {
+                const blob = new Blob([codigoHTML], { type: 'text/html' });
+                const enlace = document.createElement('a');
+                enlace.href = URL.createObjectURL(blob);
+                enlace.download = 'juego_duckdevelop.html';
+                enlace.click();
+            } catch(e) {
+                console.log("Descarga directa no soportada, usando modal.");
+            }
+
+            // 2. Muestra siempre el código en el modal para copiar fácilmente
+            document.getElementById('txtCodigoHtml').value = codigoHTML;
+            document.getElementById('modalExport').style.display = 'flex';
+        }
+
+        function copiarCodigoModal() {
+            const txt = document.getElementById('txtCodigoHtml');
+            txt.select();
+            txt.setSelectionRange(0, 999999);
+            navigator.clipboard.writeText(txt.value).then(() => {
+                alert("¡Código copiado al portapapeles!");
+            }).catch(() => {
+                document.execCommand('copy');
+                alert("¡Código copiado!");
+            });
+        }
+
+        function cerrarModal() {
+            document.getElementById('modalExport').style.display = 'none';
+        }
+
+        loop();
+    </script>
+</body>
+</html>
